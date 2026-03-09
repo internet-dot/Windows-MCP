@@ -963,12 +963,29 @@ class Desktop:
         # Draw grid lines if requested
         if grid_lines:
             w_count, h_count = grid_lines
+            grid_left = padding
+            grid_top = padding
+            grid_width = screenshot.width
+            grid_height = screenshot.height
+            if capture_rect:
+                grid_left = int(capture_rect.left - left_offset) + padding
+                grid_top = int(capture_rect.top - top_offset) + padding
+                grid_width = capture_rect.width()
+                grid_height = capture_rect.height()
             for i in range(1, w_count):
-                x = padding + (screenshot.width * i // w_count)
-                draw.line([(x, padding), (x, padding + screenshot.height)], fill=(200, 200, 200, 128), width=1)
+                x = grid_left + (grid_width * i // w_count)
+                draw.line(
+                    [(x, grid_top), (x, grid_top + grid_height)],
+                    fill=(200, 200, 200, 128),
+                    width=1,
+                )
             for i in range(1, h_count):
-                y = padding + (screenshot.height * i // h_count)
-                draw.line([(padding, y), (padding + screenshot.width, y)], fill=(200, 200, 200, 128), width=1)
+                y = grid_top + (grid_height * i // h_count)
+                draw.line(
+                    [(grid_left, y), (grid_left + grid_width, y)],
+                    fill=(200, 200, 200, 128),
+                    width=1,
+                )
 
         def draw_annotation(label, node: TreeElementNode):
             box = node.bounding_box

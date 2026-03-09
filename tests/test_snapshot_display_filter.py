@@ -138,6 +138,21 @@ class TestDisplayFiltering:
             )
         assert cropped.size == (1920, 1080)
 
+    def test_grid_lines_use_selected_display_region(self, desktop):
+        screenshot = Image.new("RGB", (3840, 1080), "white")
+        with patch.object(desktop, "get_screenshot", return_value=screenshot):
+            with patch("windows_mcp.desktop.service.uia.GetVirtualScreenRect") as mock_virtual_rect:
+                mock_virtual_rect.return_value = (0, 0, 3840, 1080)
+                annotated = desktop.get_annotated_screenshot(
+                    nodes=[],
+                    grid_lines=(2, 2),
+                    capture_rect=Rect(1920, 0, 3840, 1080),
+                )
+
+        assert annotated.size == (1920, 1080)
+        assert annotated.getpixel((960, 100)) != (255, 255, 255)
+        assert annotated.getpixel((100, 540)) != (255, 255, 255)
+
     def test_desktop_state_tracks_selected_displays(self):
         state = DesktopState(
             active_desktop={"name": "Desktop 1"},
