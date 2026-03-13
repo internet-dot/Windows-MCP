@@ -199,9 +199,9 @@ class Desktop:
         capture_rect = self.get_display_union_rect(display_indices) if display_indices else None
         screenshot_region = self._rect_to_bounding_box(capture_rect) if capture_rect else None
 
-        # Screenshot tool (use_ui_tree=False) は高速パス: ウィンドウ列挙をスキップ。
-        # UIAutomation の get_controls_handles / get_windows / get_active_window は
-        # アプリ起動中にハングする可能性があるため、スクリーンショットのみの場合は不要。
+        # Fast path for Screenshot tool (use_ui_tree=False): skip window enumeration.
+        # UIAutomation calls (get_controls_handles / get_windows / get_active_window)
+        # can hang when an app is launching and not responding to WM messages.
         if use_ui_tree:
             controls_handles = self.get_controls_handles()  # Taskbar,Program Manager,Apps, Dialogs
             windows, windows_handles = self.get_windows(controls_handles=controls_handles)  # Apps
