@@ -12,7 +12,6 @@ from fastmcp import FastMCP, Context
 from windows_mcp import filesystem
 from dotenv import load_dotenv
 from textwrap import dedent
-import windows_mcp.uia as uia
 from typing import Literal
 from enum import Enum
 import logging
@@ -23,8 +22,158 @@ import os
 import io
 
 logger = logging.getLogger(__name__)
-
 load_dotenv()
+
+
+def _snapshot_profile_enabled() -> bool:
+    value = os.getenv("WINDOWS_MCP_PROFILE_SNAPSHOT", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_bool(value: bool | str) -> bool:
+    return value is True or (isinstance(value, str) and value.lower() == "true")
+
+
+def _capture_desktop_state(
+    *,
+    use_vision: bool,
+    use_dom: bool,
+    use_annotation: bool,
+    use_ui_tree: bool,
+    width_reference_line: int | None,
+    height_reference_line: int | None,
+    display: list[int] | None,
+    tool_name: str,
+):
+    profile_enabled = _snapshot_profile_enabled()
+    profile_started_at = time.perf_counter()
+    stage_started_at = profile_started_at
+    desktop_state_ms = 0.0
+    metadata_render_ms = 0.0
+    screenshot_encode_ms = 0.0
+
+    if use_dom and not use_ui_tree:
+        raise ValueError("use_dom=True requires use_ui_tree=True")
+
+    display_indices = Desktop.parse_display_selection(display)
+
+    grid_lines = None
+    if width_reference_line and height_reference_line:
+        grid_lines = (int(width_reference_line), int(height_reference_line))
+
+    desktop_state = desktop.get_state(
+        use_vision=use_vision,
+        use_dom=use_dom,
+        use_annotation=use_annotation,
+        use_ui_tree=use_ui_tree,
+        as_bytes=False,
+        grid_lines=grid_lines,
+        display_indices=display_indices,
+        max_image_size=Size(width=MAX_IMAGE_WIDTH, height=MAX_IMAGE_HEIGHT),
+    )
+    if profile_enabled:
+        desktop_state_ms = (time.perf_counter() - stage_started_at) * 1000
+        stage_started_at = time.perf_counter()
+
+    interactive_elements = desktop_state.tree_state.interactive_elements_to_string()
+    scrollable_elements = desktop_state.tree_state.scrollable_elements_to_string()
+    windows = desktop_state.windows_to_string()
+    active_window = desktop_state.active_window_to_string()
+    active_desktop = desktop_state.active_desktop_to_string()
+    all_desktops = desktop_state.desktops_to_string()
+    if profile_enabled:
+        metadata_render_ms = (time.perf_counter() - stage_started_at) * 1000
+        stage_started_at = time.perf_counter()
+
+    screenshot_bytes = None
+    if use_vision and desktop_state.screenshot is not None:
+        buffered = io.BytesIO()
+        desktop_state.screenshot.save(buffered, format="PNG")
+        screenshot_bytes = buffered.getvalue()
+        buffered.close()
+    if profile_enabled:
+        screenshot_encode_ms = (time.perf_counter() - stage_started_at) * 1000
+        logger.info(
+            "%s profile: desktop_state_ms=%.1f metadata_render_ms=%.1f png_encode_ms=%.1f total_ms=%.1f use_vision=%s use_dom=%s use_ui_tree=%s use_annotation=%s display=%s",
+            tool_name,
+            desktop_state_ms,
+            metadata_render_ms,
+            screenshot_encode_ms,
+            (time.perf_counter() - profile_started_at) * 1000,
+            use_vision,
+            use_dom,
+            use_ui_tree,
+            use_annotation,
+            display,
+        )
+
+    return {
+        "desktop_state": desktop_state,
+        "interactive_elements": interactive_elements,
+        "scrollable_elements": scrollable_elements,
+        "windows": windows,
+        "active_window": active_window,
+        "active_desktop": active_desktop,
+        "all_desktops": all_desktops,
+        "screenshot_bytes": screenshot_bytes,
+    }
+
+
+def _build_snapshot_response(
+    capture_result: dict[str, object],
+    *,
+    include_ui_details: bool,
+    ui_detail_note: str | None = None,
+):
+    desktop_state = capture_result["desktop_state"]
+    interactive_elements = capture_result["interactive_elements"]
+    scrollable_elements = capture_result["scrollable_elements"]
+    windows = capture_result["windows"]
+    active_window = capture_result["active_window"]
+    active_desktop = capture_result["active_desktop"]
+    all_desktops = capture_result["all_desktops"]
+    screenshot_bytes = capture_result["screenshot_bytes"]
+
+    metadata_text = f"Cursor Position: {desktop_state.cursor_position}\n"
+    if desktop_state.screenshot_size:
+        metadata_text += f"Screenshot Resolution: {desktop_state.screenshot_size.to_string()}\n"
+    if desktop_state.screenshot_region:
+        metadata_text += (
+            f"Screenshot Region: {desktop_state.screenshot_region.xyxy_to_string()}\n"
+        )
+    if desktop_state.screenshot_displays:
+        metadata_text += f"Displays: {','.join(str(index) for index in desktop_state.screenshot_displays)}\n"
+        metadata_text += "Coordinate Space: Virtual desktop coordinates\n"
+    if ui_detail_note:
+        metadata_text += f"{ui_detail_note}\n"
+
+    response_text = dedent(f'''
+    {metadata_text}
+    Active Desktop:
+    {active_desktop}
+
+    All Desktops:
+    {all_desktops}
+
+    Focused Window:
+    {active_window}
+
+    Opened Windows:
+    {windows}
+    ''')
+    if include_ui_details:
+        response_text += dedent(f'''
+
+    List of Interactive Elements:
+    {interactive_elements or "No interactive elements found."}
+
+    List of Scrollable Elements:
+    {scrollable_elements or 'No scrollable elements found.'}''')
+
+    response = [response_text]
+    if screenshot_bytes:
+        response.append(Image(data=screenshot_bytes, format='png'))
+    return response
 
 @dataclass
 class Config:
@@ -85,7 +234,7 @@ mcp = FastMCP(name="windows-mcp", instructions=instructions, lifespan=lifespan)
 @with_analytics(analytics, "App-Tool")
 def app_tool(mode:Literal['launch','resize','switch']='launch',name:str|None=None,window_loc:list[int]|None=None,window_size:list[int]|None=None, ctx: Context = None):
     return desktop.app(mode,name,window_loc,window_size)
-    
+
 @mcp.tool(
     name="PowerShell",
     description="A comprehensive system tool for executing any PowerShell commands. Use it to navigate the file system, manage files and processes, and execute system-level operations. Capable of accessing web content (e.g., via Invoke-WebRequest), interacting with network resources, and performing complex administrative tasks. This tool provides full access to the underlying operating system capabilities, making it the primary interface for system automation, scripting, and deep system interaction.",
@@ -199,45 +348,16 @@ def state_tool(
     ctx: Context = None
 ):
     try:
-        use_vision = use_vision is True or (isinstance(use_vision, str) and use_vision.lower() == 'true')
-        use_dom = use_dom is True or (isinstance(use_dom, str) and use_dom.lower() == 'true')
-        use_annotation = use_annotation is True or (isinstance(use_annotation, str) and use_annotation.lower() == 'true')
-        use_ui_tree = use_ui_tree is True or (isinstance(use_ui_tree, str) and use_ui_tree.lower() == 'true')
-
-        if use_dom and not use_ui_tree:
-            raise ValueError("use_dom=True requires use_ui_tree=True")
-
-        display_indices = Desktop.parse_display_selection(display)
-        
-        grid_lines = None
-        if width_reference_line and height_reference_line:
-            grid_lines = (int(width_reference_line), int(height_reference_line))
-
-        desktop_state = desktop.get_state(
-            use_vision=use_vision,
-            use_dom=use_dom,
-            use_annotation=use_annotation,
-            use_ui_tree=use_ui_tree,
-            as_bytes=False,
-            grid_lines=grid_lines,
-            display_indices=display_indices,
-            max_image_size=Size(width=MAX_IMAGE_WIDTH, height=MAX_IMAGE_HEIGHT),
+        capture_result = _capture_desktop_state(
+            use_vision=_as_bool(use_vision),
+            use_dom=_as_bool(use_dom),
+            use_annotation=_as_bool(use_annotation),
+            use_ui_tree=_as_bool(use_ui_tree),
+            width_reference_line=width_reference_line,
+            height_reference_line=height_reference_line,
+            display=display,
+            tool_name="Snapshot tool",
         )
-        
-        interactive_elements=desktop_state.tree_state.interactive_elements_to_string()
-        scrollable_elements=desktop_state.tree_state.scrollable_elements_to_string()
-        windows=desktop_state.windows_to_string()
-        active_window=desktop_state.active_window_to_string()
-        active_desktop=desktop_state.active_desktop_to_string()
-        all_desktops=desktop_state.desktops_to_string()
-        
-        # Convert screenshot to bytes for vision response
-        screenshot_bytes = None
-        if use_vision and desktop_state.screenshot is not None:
-            buffered = io.BytesIO()
-            desktop_state.screenshot.save(buffered, format="PNG")
-            screenshot_bytes = buffered.getvalue()
-            buffered.close()
     except Exception as e:
         logger.warning(
             "Snapshot failed with display=%s use_vision=%s use_dom=%s",
@@ -247,37 +367,53 @@ def state_tool(
             exc_info=True,
         )
         return [f'Error capturing desktop state: {str(e)}. Please try again.']
-    
-    metadata_text = f"Cursor Position: {desktop_state.cursor_position}\n"
-    if desktop_state.screenshot_size:
-        metadata_text += f"Screenshot Resolution: {desktop_state.screenshot_size.to_string()}\n"
-    if desktop_state.screenshot_region:
-        metadata_text += (
-            f"Screenshot Region: {desktop_state.screenshot_region.xyxy_to_string()}\n"
+
+    return _build_snapshot_response(capture_result, include_ui_details=True)
+
+
+@mcp.tool(
+    name='Screenshot',
+    description="Captures a fast screenshot-first desktop snapshot with cursor position, desktop/window summaries, and an image. This path skips UI tree extraction for speed. Use Snapshot when you need interactive element ids, scrollable regions, or browser DOM extraction.",
+    annotations=ToolAnnotations(
+        title="Screenshot",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+@with_analytics(analytics, "Screenshot-Tool")
+def screenshot_tool(
+    use_annotation: bool | str = False,
+    width_reference_line: int | None = None,
+    height_reference_line: int | None = None,
+    display: list[int] | None = None,
+    ctx: Context = None,
+):
+    try:
+        capture_result = _capture_desktop_state(
+            use_vision=True,
+            use_dom=False,
+            use_annotation=_as_bool(use_annotation),
+            use_ui_tree=False,
+            width_reference_line=width_reference_line,
+            height_reference_line=height_reference_line,
+            display=display,
+            tool_name="Screenshot tool",
         )
-    if desktop_state.screenshot_displays:
-        metadata_text += f"Displays: {','.join(str(index) for index in desktop_state.screenshot_displays)}\n"
-        metadata_text += "Coordinate Space: Virtual desktop coordinates\n"
+    except Exception as e:
+        logger.warning(
+            "Screenshot failed with display=%s",
+            display,
+            exc_info=True,
+        )
+        return [f'Error capturing screenshot: {str(e)}. Please try again.']
 
-    return [dedent(f'''
-    {metadata_text}
-    Active Desktop:
-    {active_desktop}
-
-    All Desktops:
-    {all_desktops}
-
-    Focused Window:
-    {active_window}
-
-    Opened Windows:
-    {windows}
-
-    List of Interactive Elements:
-    {interactive_elements or "No interactive elements found."}
-
-    List of Scrollable Elements:
-    {scrollable_elements or 'No scrollable elements found.'}''')]+([Image(data=screenshot_bytes,format='png')] if use_vision and screenshot_bytes else [])
+    return _build_snapshot_response(
+        capture_result,
+        include_ui_details=False,
+        ui_detail_note="UI Tree: Skipped for fast screenshot-only capture. Call Snapshot when you need interactive or scrollable elements.",
+    )
 
 @mcp.tool(
     name="Click",
@@ -541,7 +677,7 @@ def multi_select_tool(
                 locs.append(list(desktop.get_coordinates_from_label(label)))
             except Exception as e:
                 raise ValueError(f"Failed to find element with label {label}: {e}")
-                
+
     press_ctrl = press_ctrl is True or (
         isinstance(press_ctrl, str) and press_ctrl.lower() == "true"
     )
@@ -582,7 +718,7 @@ def multi_edit_tool(
                 locs.append([loc[0], loc[1], text])
             except Exception as e:
                 raise ValueError(f"Failed to process label item {item}: {e}")
-                
+
     desktop.multi_edit(locs)
     elements_str = ", ".join([f"({e[0]},{e[1]}) with text '{e[2]}'" for e in locs])
     return f"Multi-edited elements at: {elements_str}"

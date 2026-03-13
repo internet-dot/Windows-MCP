@@ -4,6 +4,7 @@ from uuid_extensions import uuid7str
 from fastmcp import Context
 from functools import wraps
 from pathlib import Path
+import inspect
 import posthog
 import asyncio
 import logging
@@ -158,7 +159,7 @@ def with_analytics(analytics_instance: Analytics | None, tool_name: str):
                 pass
 
             try:
-                if asyncio.iscoroutinefunction(func):
+                if inspect.iscoroutinefunction(func):
                     result = await func(*args, **kwargs)
                 else:
                     # Run sync function in thread to avoid blocking loop

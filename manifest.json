@@ -77,8 +77,12 @@
       "description": "Manages file system operations with eight modes: 'read' (read text file contents), 'write' (create/overwrite/append to files), 'copy' (copy files or directories), 'move' (move or rename), 'delete' (delete files or directories), 'list' (list directory contents), 'search' (find files by glob pattern), 'info' (get metadata like size, dates, type). Relative paths are resolved from the user's Desktop folder. Use absolute paths to access other locations."
     },
     {
+      "name": "Screenshot",
+      "description": "Captures a fast screenshot-first desktop snapshot with cursor position, active/open windows, and an image. Skips UI tree extraction for speed and should be the default first call when you mainly need visual context. Supports display=[0] or display=[0,1] to limit capture to specific screens."
+    },
+    {
       "name": "Snapshot",
-      "description": "Captures complete desktop state including: system language, focused/opened windows, interactive elements (buttons, text fields, links, menus with coordinates), and scrollable areas. Set use_vision=True to include screenshot. Set use_dom=True for browser content to get web page elements instead of browser UI. Set display=[0] or display=[0,1] to limit all returned Snapshot information to specific screens; omit it to keep the default full-desktop behavior. Always call this first to understand the current desktop state before taking actions."
+      "description": "Captures complete desktop state including: system language, focused/opened windows, interactive elements (buttons, text fields, links, menus with coordinates), and scrollable areas. Use this when you need interactive element ids, scrollable regions, or browser DOM extraction with use_dom=True. Set use_vision=True to include screenshot. Set display=[0] or display=[0,1] to limit all returned Snapshot information to specific screens; omit it to keep the default full-desktop behavior."
     },
     {
       "name": "Click",
@@ -106,7 +110,7 @@
     },
     {
       "name": "Scrape",
-      "description": "Fetch content from a URL or the active browser tab. By default, performs a lightweight HTTP request to the URL. If you need to extract text from the active tab's DOM within the viewport, ensure the page is open in a browser and use Snapshot with use_dom=True first, then the agent will handle extraction."
+      "description": "Fetch content from a URL or the active browser tab. By default, performs a lightweight HTTP request to the URL. If you need to extract text from the active tab's DOM within the viewport, ensure the page is open in a browser and use Snapshot with use_dom=True first, then the agent will handle extraction. Use Screenshot for the default fast visual inspection path."
     },
     {
       "name": "MultiSelect",

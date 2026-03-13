@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 15 tools (App, Shell, Snapshot, Click, Type, Scroll, Move, Shortcut, Wait, Scrape, MultiSelect, MultiEdit, Clipboard, Process, Notification) via FastMCP.
+Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 16 tools (App, Shell, Screenshot, Snapshot, Click, Type, Scroll, Move, Shortcut, Wait, Scrape, MultiSelect, MultiEdit, Clipboard, Process, Notification) via FastMCP.
 
 ## Build & Development Commands
 
@@ -49,6 +49,7 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 
 - Screenshots are capped to 1920x1080 for token efficiency
 - Mouse/keyboard input uses UIA (same coordinate space as BoundingRectangle; no DPI mismatch)
+- Screenshot is the preferred fast visual-context tool; Snapshot is the heavier path for UI element ids and DOM extraction
 - Browser detection (Chrome, Edge, Firefox) triggers special DOM extraction mode in Snapshot
 - Fuzzy string matching (`thefuzz`) is used for element name matching
 - UI element fetching has retry logic (`THREAD_MAX_RETRIES=3` in tree service)

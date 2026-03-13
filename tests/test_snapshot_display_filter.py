@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ from windows_mcp.desktop.service import Desktop
 from windows_mcp.desktop.views import DesktopState, Size, Status, Window
 from windows_mcp.tree.views import BoundingBox, Center, ScrollElementNode, TreeElementNode, TreeState
 from windows_mcp.uia import Rect
+import windows_mcp.__main__ as main_module
 
 
 def make_box(left: int, top: int, right: int, bottom: int) -> BoundingBox:
@@ -44,7 +46,9 @@ class TestDisplayFiltering:
     @pytest.fixture
     def desktop(self):
         with patch.object(Desktop, "__init__", lambda self: None):
-            return Desktop()
+            desktop = Desktop()
+            desktop._dxcam_cameras = {}
+            return desktop
 
     def test_get_display_union_rect(self, desktop):
         with patch("windows_mcp.desktop.service.uia.GetMonitorsRect") as mock_get_monitors:
@@ -138,9 +142,67 @@ class TestDisplayFiltering:
             )
         assert cropped.size == (1920, 1080)
 
+    def test_get_screenshot_uses_display_bbox_for_direct_capture(self, desktop):
+        capture_rect = Rect(1920, 0, 3840, 1080)
+        with patch("windows_mcp.desktop.service.dxcam", None):
+            with patch("windows_mcp.desktop.service.ImageGrab.grab") as mock_grab:
+                mock_grab.return_value = Image.new("RGB", (1920, 1080), "white")
+                screenshot = desktop.get_screenshot(capture_rect=capture_rect)
+
+        assert screenshot.size == (1920, 1080)
+        assert mock_grab.call_args.kwargs == {
+            "bbox": (1920, 0, 3840, 1080),
+            "all_screens": True,
+        }
+
+    def test_get_screenshot_uses_dxcam_for_single_display_capture(self, desktop, monkeypatch):
+        capture_rect = Rect(1920, 0, 3840, 1080)
+        fake_camera = MagicMock()
+        fake_camera.grab.return_value = [[[255, 255, 255]]]
+        fake_dxcam = MagicMock()
+        fake_dxcam.create.return_value = fake_camera
+
+        monkeypatch.setenv("WINDOWS_MCP_SCREENSHOT_BACKEND", "dxcam")
+        monkeypatch.setattr("windows_mcp.desktop.service.dxcam", fake_dxcam)
+        monkeypatch.setattr(
+            "windows_mcp.desktop.service.uia.GetMonitorsRect",
+            lambda: [Rect(0, 0, 1920, 1080), Rect(1920, 0, 3840, 1080)],
+        )
+        with patch(
+            "windows_mcp.desktop.service.Image.fromarray",
+            return_value=Image.new("RGB", (1, 1), "white"),
+        ) as mock_fromarray:
+            screenshot = desktop.get_screenshot(capture_rect=capture_rect)
+
+        assert screenshot.size == (1, 1)
+        fake_dxcam.create.assert_called_once_with(output_idx=1, processor_backend="numpy")
+        fake_camera.grab.assert_called_once_with(region=None, copy=True, new_frame_only=False)
+        mock_fromarray.assert_called_once()
+
+    def test_get_screenshot_falls_back_to_pillow_when_dxcam_region_is_unsupported(self, desktop, monkeypatch):
+        capture_rect = Rect(0, 0, 3840, 1080)
+        fake_dxcam = MagicMock()
+
+        monkeypatch.setenv("WINDOWS_MCP_SCREENSHOT_BACKEND", "dxcam")
+        monkeypatch.setattr("windows_mcp.desktop.service.dxcam", fake_dxcam)
+        monkeypatch.setattr(
+            "windows_mcp.desktop.service.uia.GetMonitorsRect",
+            lambda: [Rect(0, 0, 1920, 1080), Rect(1920, 0, 3840, 1080)],
+        )
+        with patch("windows_mcp.desktop.service.ImageGrab.grab") as mock_grab:
+            mock_grab.return_value = Image.new("RGB", (1920, 1080), "white")
+            screenshot = desktop.get_screenshot(capture_rect=capture_rect)
+
+        assert screenshot.size == (3840, 1080)
+        assert fake_dxcam.create.call_count == 0
+        assert mock_grab.call_args.kwargs == {
+            "bbox": (0, 0, 3840, 1080),
+            "all_screens": True,
+        }
+
     def test_grid_lines_use_selected_display_region(self, desktop):
-        screenshot = Image.new("RGB", (3840, 1080), "white")
-        with patch.object(desktop, "get_screenshot", return_value=screenshot):
+        screenshot = Image.new("RGB", (1920, 1080), "white")
+        with patch.object(desktop, "get_screenshot", return_value=screenshot) as mock_get_screenshot:
             with patch("windows_mcp.desktop.service.uia.GetVirtualScreenRect") as mock_virtual_rect:
                 mock_virtual_rect.return_value = (0, 0, 3840, 1080)
                 annotated = desktop.get_annotated_screenshot(
@@ -150,6 +212,7 @@ class TestDisplayFiltering:
                 )
 
         assert annotated.size == (1920, 1080)
+        mock_get_screenshot.assert_called_once_with(capture_rect=Rect(1920, 0, 3840, 1080))
         assert annotated.getpixel((960, 100)) != (255, 255, 255)
         assert annotated.getpixel((100, 540)) != (255, 255, 255)
 
@@ -204,3 +267,79 @@ class TestDisplayFiltering:
 
         with pytest.raises(ValueError, match="use_dom=True requires use_ui_tree=True"):
             desktop.get_state(use_dom=True, use_ui_tree=False)
+
+    def test_get_state_logs_snapshot_profile_when_enabled(self, desktop, monkeypatch):
+        desktop.tree = MagicMock()
+        desktop.tree.screen_box = make_box(0, 0, 1920, 1080)
+        desktop.get_controls_handles = MagicMock(return_value={1})
+        active_window = Window(
+            name="Browser",
+            is_browser=True,
+            depth=0,
+            status=Status.NORMAL,
+            bounding_box=make_box(100, 100, 700, 500),
+            handle=1,
+            process_id=11,
+        )
+        desktop.get_windows = MagicMock(return_value=([active_window], {1}))
+        desktop.get_active_window = MagicMock(return_value=active_window)
+        desktop.get_cursor_location = MagicMock(return_value=(250, 180))
+        logged: list[str] = []
+
+        monkeypatch.setenv("WINDOWS_MCP_PROFILE_SNAPSHOT", "1")
+        monkeypatch.setattr("windows_mcp.desktop.service.logger.info", lambda message, *args: logged.append(message % args if args else message))
+
+        with patch("windows_mcp.desktop.service.get_current_desktop", return_value={"name": "Desktop 1"}):
+            with patch("windows_mcp.desktop.service.get_all_desktops", return_value=[{"name": "Desktop 1"}]):
+                desktop.get_state(
+                    use_vision=False,
+                    use_annotation=False,
+                    use_ui_tree=False,
+                )
+
+        assert any("Snapshot profile:" in message for message in logged)
+
+
+class TestSnapshotTools:
+    @pytest.fixture
+    def desktop_state(self):
+        return DesktopState(
+            active_desktop={"name": "Desktop 1"},
+            all_desktops=[{"name": "Desktop 1"}],
+            active_window=None,
+            windows=[],
+            screenshot=Image.new("RGB", (640, 480), "white"),
+            cursor_position=(25, 30),
+            screenshot_size=Size(width=640, height=480),
+            screenshot_region=make_box(0, 0, 640, 480),
+            screenshot_displays=[0],
+            tree_state=TreeState(),
+        )
+
+    def test_snapshot_tool_keeps_ui_tree_enabled_by_default(self, desktop_state, monkeypatch):
+        fake_desktop = MagicMock()
+        fake_desktop.get_state.return_value = desktop_state
+        monkeypatch.setattr(main_module, "desktop", fake_desktop)
+
+        result = asyncio.run(main_module.state_tool(use_vision=True, display=[0]))
+
+        assert len(result) == 2
+        call = fake_desktop.get_state.call_args.kwargs
+        assert call["use_vision"] is True
+        assert call["use_ui_tree"] is True
+        assert call["use_annotation"] is True
+
+    def test_screenshot_tool_uses_fast_path_without_ui_tree(self, desktop_state, monkeypatch):
+        fake_desktop = MagicMock()
+        fake_desktop.get_state.return_value = desktop_state
+        monkeypatch.setattr(main_module, "desktop", fake_desktop)
+
+        result = asyncio.run(main_module.screenshot_tool(display=[0]))
+
+        assert len(result) == 2
+        assert "UI Tree: Skipped for fast screenshot-only capture." in result[0]
+        call = fake_desktop.get_state.call_args.kwargs
+        assert call["use_vision"] is True
+        assert call["use_ui_tree"] is False
+        assert call["use_dom"] is False
+        assert call["use_annotation"] is False

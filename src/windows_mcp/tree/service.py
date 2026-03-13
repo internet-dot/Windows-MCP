@@ -8,9 +8,15 @@ from time import sleep,perf_counter
 import logging
 import weakref
 import ctypes
+import os
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _snapshot_profile_enabled() -> bool:
+    value = os.getenv("WINDOWS_MCP_PROFILE_SNAPSHOT", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 if TYPE_CHECKING:
     from windows_mcp.desktop.service import Desktop
@@ -33,6 +39,7 @@ class Tree:
         self.dom = None
         self.dom_bounding_box = None
         start_time = perf_counter()
+        profile_enabled = _snapshot_profile_enabled()
 
         active_window_flag=False
         if active_window_handle:
@@ -78,6 +85,18 @@ class Tree:
         if not status:
             logger.warning(f"[Tree] {len(failed_handles)} window(s) failed to capture — UI services may be loading")
         end_time = perf_counter()
+        if profile_enabled:
+            logger.info(
+                "Snapshot tree profile: windows=%d active_window=%s interactive_nodes=%d scrollable_nodes=%d dom_nodes=%d failed_windows=%d total_ms=%.1f use_dom=%s",
+                len(windows_handles),
+                active_window_handle is not None,
+                len(interactive_nodes),
+                len(scrollable_nodes),
+                len(dom_informative_nodes),
+                len(failed_handles),
+                (end_time - start_time) * 1000,
+                use_dom,
+            )
         logger.debug(f"[Tree] Tree State capture took {end_time - start_time:.2f} seconds")
         return TreeState(status=status,root_node=root_node,dom_node=dom_node,interactive_nodes=interactive_nodes,scrollable_nodes=scrollable_nodes,dom_informative_nodes=dom_informative_nodes)
 

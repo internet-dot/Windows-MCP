@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from typing import Literal
 from markdownify import markdownify
 from fuzzywuzzy import process
-from time import sleep, time
+from time import sleep, time, perf_counter
 from psutil import Process
 import win32process
 import subprocess
@@ -36,6 +36,11 @@ logger.setLevel(logging.INFO)
 
 import windows_mcp.uia as uia  # noqa: E402
 
+try:
+    import dxcam
+except ImportError:
+    dxcam = None
+
 # Key name aliases for shortcut keys that differ from UIA SpecialKeyNames
 _KEY_ALIASES = {
     "backspace": "Back",
@@ -45,6 +50,11 @@ _KEY_ALIASES = {
     "command": "Win",
     "option": "Alt",
 }
+
+
+def _snapshot_profile_enabled() -> bool:
+    value = os.getenv("WINDOWS_MCP_PROFILE_SNAPSHOT", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _escape_text_for_sendkeys(text: str) -> str:
@@ -71,6 +81,83 @@ class Desktop:
         self.encoding = getpreferredencoding()
         self.tree = Tree(self)
         self.desktop_state = None
+        self._dxcam_cameras: dict[int, object] = {}
+
+    @staticmethod
+    def _get_screenshot_backend() -> str:
+        value = os.getenv("WINDOWS_MCP_SCREENSHOT_BACKEND", "auto")
+        normalized = value.strip().lower()
+        if normalized in {"auto", "pillow", "dxcam"}:
+            return normalized
+        logger.warning(
+            "Unknown screenshot backend '%s'; falling back to auto",
+            value,
+        )
+        return "auto"
+
+    def _resolve_dxcam_region(
+        self, capture_rect: uia.Rect | None
+    ) -> tuple[int, tuple[int, int, int, int] | None] | None:
+        if dxcam is None or capture_rect is None:
+            return None
+
+        monitor_rects = uia.GetMonitorsRect()
+        for output_idx, monitor_rect in enumerate(monitor_rects):
+            if (
+                monitor_rect.left <= capture_rect.left
+                and monitor_rect.top <= capture_rect.top
+                and monitor_rect.right >= capture_rect.right
+                and monitor_rect.bottom >= capture_rect.bottom
+            ):
+                if monitor_rect == capture_rect:
+                    return output_idx, None
+                return output_idx, (
+                    capture_rect.left - monitor_rect.left,
+                    capture_rect.top - monitor_rect.top,
+                    capture_rect.right - monitor_rect.left,
+                    capture_rect.bottom - monitor_rect.top,
+                )
+        return None
+
+    def _get_dxcam_camera(self, output_idx: int):
+        camera = self._dxcam_cameras.get(output_idx)
+        if camera is None:
+            camera = dxcam.create(output_idx=output_idx, processor_backend="numpy")
+            self._dxcam_cameras[output_idx] = camera
+        return camera
+
+    def _capture_with_dxcam(self, capture_rect: uia.Rect) -> Image.Image:
+        resolved = self._resolve_dxcam_region(capture_rect)
+        if resolved is None:
+            raise ValueError("DXGI capture supports only regions fully contained within one display")
+
+        output_idx, region = resolved
+        camera = self._get_dxcam_camera(output_idx)
+        frame = camera.grab(region=region, copy=True, new_frame_only=False)
+        if frame is None:
+            raise RuntimeError("DXGI capture returned no frame")
+        return Image.fromarray(frame)
+
+    def _capture_with_pillow(self, capture_rect: uia.Rect | None = None) -> Image.Image:
+        grab_kwargs = {"all_screens": True}
+        if capture_rect is not None:
+            grab_kwargs["bbox"] = (
+                capture_rect.left,
+                capture_rect.top,
+                capture_rect.right,
+                capture_rect.bottom,
+            )
+        try:
+            screenshot = ImageGrab.grab(**grab_kwargs)
+        except Exception:
+            if capture_rect is not None:
+                logger.warning(
+                    "Failed to capture selected region directly, falling back to virtual screen crop"
+                )
+                return self._crop_screenshot(ImageGrab.grab(all_screens=True), capture_rect)
+            logger.warning("Failed to capture virtual screen, using primary screen")
+            screenshot = ImageGrab.grab()
+        return self._crop_screenshot(screenshot, capture_rect)
 
     def get_state(
         self,
@@ -100,6 +187,15 @@ class Desktop:
             raise ValueError("use_dom=True requires use_ui_tree=True")
 
         start_time = time()
+        profile_enabled = _snapshot_profile_enabled()
+        profile_started_at = perf_counter()
+        stage_started_at = profile_started_at
+        desktop_context_ms = 0.0
+        tree_capture_ms = 0.0
+        region_filter_ms = 0.0
+        screenshot_capture_ms = 0.0
+        screenshot_resize_ms = 0.0
+        state_build_ms = 0.0
         capture_rect = self.get_display_union_rect(display_indices) if display_indices else None
         screenshot_region = self._rect_to_bounding_box(capture_rect) if capture_rect else None
 
@@ -107,7 +203,7 @@ class Desktop:
         windows, windows_handles = self.get_windows(controls_handles=controls_handles)  # Apps
         active_window = self.get_active_window(windows=windows)  # Active Window
         active_window_handle = active_window.handle if active_window else None
-        
+
         cursor_position = self.get_cursor_location()
 
         try:
@@ -122,6 +218,10 @@ class Desktop:
 
         if active_window is not None and active_window in windows:
             windows.remove(active_window)
+
+        if profile_enabled:
+            desktop_context_ms = (perf_counter() - stage_started_at) * 1000
+            stage_started_at = perf_counter()
 
         logger.debug(f"Active window: {active_window or 'No Active Window Found'}")
         logger.debug(f"Windows: {windows}")
@@ -145,6 +245,10 @@ class Desktop:
                 ),
             )
 
+        if profile_enabled:
+            tree_capture_ms = (perf_counter() - stage_started_at) * 1000
+            stage_started_at = perf_counter()
+
         if screenshot_region:
             active_window = self._filter_window_to_region(active_window, screenshot_region)
             windows = self._filter_windows_to_region(windows, screenshot_region)
@@ -152,6 +256,10 @@ class Desktop:
                 tree_state = self._filter_tree_state_to_region(tree_state, screenshot_region)
             if cursor_position and not self._point_in_region(cursor_position, screenshot_region):
                 cursor_position = None
+
+        if profile_enabled:
+            region_filter_ms = (perf_counter() - stage_started_at) * 1000
+            stage_started_at = perf_counter()
 
         screenshot_size = None
         if use_vision:
@@ -165,6 +273,10 @@ class Desktop:
                 )
             else:
                 screenshot = self.get_screenshot(capture_rect=capture_rect)
+
+            if profile_enabled:
+                screenshot_capture_ms = (perf_counter() - stage_started_at) * 1000
+                stage_started_at = perf_counter()
 
             if max_image_size:
                 scale_width = (
@@ -184,7 +296,11 @@ class Desktop:
                     (int(screenshot.width * scale), int(screenshot.height * scale)),
                     Image.LANCZOS,
                 )
-            
+
+            if profile_enabled:
+                screenshot_resize_ms = (perf_counter() - stage_started_at) * 1000
+                stage_started_at = perf_counter()
+
             screenshot_size = Size(width=screenshot.width, height=screenshot.height)
 
             if as_bytes:
@@ -207,6 +323,24 @@ class Desktop:
             screenshot_displays=display_indices,
             tree_state=tree_state,
         )
+        if profile_enabled:
+            state_build_ms = (perf_counter() - stage_started_at) * 1000
+            total_profile_ms = (perf_counter() - profile_started_at) * 1000
+            logger.info(
+                "Snapshot profile: desktop_context_ms=%.1f tree_capture_ms=%.1f region_filter_ms=%.1f screenshot_capture_ms=%.1f screenshot_resize_ms=%.1f state_build_ms=%.1f total_ms=%.1f use_vision=%s use_dom=%s use_ui_tree=%s use_annotation=%s displays=%s",
+                desktop_context_ms,
+                tree_capture_ms,
+                region_filter_ms,
+                screenshot_capture_ms,
+                screenshot_resize_ms,
+                state_build_ms,
+                total_profile_ms,
+                use_vision,
+                use_dom,
+                use_ui_tree,
+                use_annotation,
+                display_indices,
+            )
         # Log the time taken to capture the state
         end_time = time()
         logger.info(f"Desktop State capture took {end_time - start_time:.2f} seconds")
@@ -293,14 +427,14 @@ class Desktop:
                     env["PATHEXT"] = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL;.PY;.PYW"
 
             shell = "pwsh" if shutil.which("pwsh") else "powershell"
-                
+
             args = [shell, "-NoProfile"]
-            # Only older Windows PowerShell (5.1) uses -OutputFormat Text successfully here 
+            # Only older Windows PowerShell (5.1) uses -OutputFormat Text successfully here
             shell_name = os.path.basename(shell).lower().replace(".exe", "")
             if shell_name == "powershell":
                 args.extend(["-OutputFormat", "Text"])
             args.extend(["-EncodedCommand", encoded])
-            
+
             result = subprocess.run(
                 args,
                 capture_output=True,  # No errors='ignore' - let subprocess return bytes
@@ -467,7 +601,7 @@ class Desktop:
             validation_id = appid.replace("\\", "").replace("_", "").replace(".", "").replace("-", "").replace("!", "")
             if not validation_id.isalnum():
                 return (f"Invalid app identifier: {appid}", 1, 0)
-            
+
             safe = ps_quote(f"shell:AppsFolder\\{appid}")
             command = f"Start-Process {safe}"
             response, status = self.execute_command(command)
@@ -964,12 +1098,20 @@ class Desktop:
         )
 
     def get_screenshot(self, capture_rect: uia.Rect | None = None) -> Image.Image:
-        try:
-            screenshot = ImageGrab.grab(all_screens=True)
-        except Exception:
-            logger.warning("Failed to capture virtual screen, using primary screen")
-            screenshot = ImageGrab.grab()
-        return self._crop_screenshot(screenshot, capture_rect)
+        backend = self._get_screenshot_backend()
+        if backend in {"auto", "dxcam"} and capture_rect is not None and dxcam is not None:
+            try:
+                return self._capture_with_dxcam(capture_rect)
+            except Exception:
+                logger.warning(
+                    "DXGI capture failed for region %s; falling back to Pillow",
+                    capture_rect,
+                    exc_info=backend == "dxcam",
+                )
+        elif backend == "dxcam" and dxcam is None:
+            logger.warning("DXGI capture requested but dxcam is not installed; falling back to Pillow")
+
+        return self._capture_with_pillow(capture_rect)
 
     def get_annotated_screenshot(
         self,
@@ -978,7 +1120,7 @@ class Desktop:
         grid_lines: tuple[int, int] | None = None,
         capture_rect: uia.Rect | None = None,
     ) -> Image.Image:
-        screenshot = self.get_screenshot()
+        screenshot = self.get_screenshot(capture_rect=capture_rect)
         # Add padding
         padding = 5
         width = int(screenshot.width + (1.5 * padding))
@@ -996,7 +1138,10 @@ class Desktop:
         def get_random_color():
             return "#{:06x}".format(random.randint(0, 0xFFFFFF))
 
-        left_offset, top_offset, _, _ = uia.GetVirtualScreenRect()
+        if capture_rect:
+            left_offset, top_offset = capture_rect.left, capture_rect.top
+        else:
+            left_offset, top_offset, _, _ = uia.GetVirtualScreenRect()
 
         # Draw grid lines if requested
         if grid_lines:
@@ -1005,11 +1150,6 @@ class Desktop:
             grid_top = padding
             grid_width = screenshot.width
             grid_height = screenshot.height
-            if capture_rect:
-                grid_left = int(capture_rect.left - left_offset) + padding
-                grid_top = int(capture_rect.top - top_offset) + padding
-                grid_width = capture_rect.width()
-                grid_height = capture_rect.height()
             for i in range(1, w_count):
                 x = grid_left + (grid_width * i // w_count)
                 draw.line(
@@ -1070,13 +1210,13 @@ class Desktop:
             # Adjust for virtual screen offset and padding
             acx = int(cx - left_offset) + padding
             acy = int(cy - top_offset) + padding
-            
+
             # Draw a distinctive marker (e.g., a circle or crosshair with a box)
             r = 15
             draw.ellipse([acx - r, acy - r, acx + r, acy + r], outline="red", width=3)
             draw.line([acx - r, acy, acx + r, acy], fill="red", width=2)
             draw.line([acx, acy - r, acx, acy + r], fill="red", width=2)
-            
+
             # Draw "Cursor" label
             c_label = "CURSOR"
             c_label_width = draw.textlength(c_label, font=font)
@@ -1084,8 +1224,9 @@ class Desktop:
             draw.text((acx + r + 2, acy - r), c_label, fill="white", font=font)
 
         if capture_rect:
-            crop_box = self._build_crop_box(capture_rect, padding=padding)
-            return padded_screenshot.crop(crop_box)
+            return padded_screenshot.crop(
+                (padding, padding, padding + screenshot.width, padding + screenshot.height)
+            )
 
         return padded_screenshot
 
