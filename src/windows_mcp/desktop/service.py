@@ -530,8 +530,22 @@ class Desktop:
                 win32gui.BringWindowToTop(target_handle)
                 return
 
+            # We attach our own thread (current_tid) to both the foreground and
+            # target window threads to make focus change succeed.
+            #
+            # Simply attaching foreground_thread to target_thread is not sufficient:
+            # SetForegroundWindow is called from our MCP thread, and Windows requires
+            # the calling process to satisfy the "received the last input event"
+            # criterion. Without attaching current_tid, the system may only bring the
+            # target window to the front but refuse to transfer keyboard
+            # focus, causing subsequent keyboard input to remain in the previous window.
+            #
+            # By attaching current_tid to both threads, our thread shares
+            # their input state and inherits that eligibility, allowing the system to
+            # grant the focus switch.
             foreground_thread, _ = win32process.GetWindowThreadProcessId(foreground_handle)
             target_thread, _ = win32process.GetWindowThreadProcessId(target_handle)
+            current_tid = ctypes.windll.kernel32.GetCurrentThreadId()
 
             if not foreground_thread or not target_thread or foreground_thread == target_thread:
                 win32gui.SetForegroundWindow(target_handle)
@@ -540,10 +554,12 @@ class Desktop:
 
             ctypes.windll.user32.AllowSetForegroundWindow(-1)
 
-            attached = False
+            attached_threads = []
             try:
-                win32process.AttachThreadInput(foreground_thread, target_thread, True)
-                attached = True
+                for thread in (foreground_thread, target_thread):
+                    if thread and thread != current_tid:
+                        win32process.AttachThreadInput(current_tid, thread, True)
+                        attached_threads.append(thread)
 
                 win32gui.SetForegroundWindow(target_handle)
                 win32gui.BringWindowToTop(target_handle)
@@ -559,8 +575,8 @@ class Desktop:
                 )
 
             finally:
-                if attached:
-                    win32process.AttachThreadInput(foreground_thread, target_thread, False)
+                for tid in reversed(attached_threads):
+                    win32process.AttachThreadInput(current_tid, tid, False)
 
         except Exception as e:
             logger.exception(f"Failed to bring window to top: {e}")
