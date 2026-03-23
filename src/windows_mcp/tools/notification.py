@@ -1,6 +1,9 @@
 """Notification tool — Windows toast notifications."""
 
+from typing import Annotated
+
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from windows_mcp.analytics import with_analytics
 from fastmcp import Context
 
@@ -18,8 +21,24 @@ def register(mcp, *, get_desktop, get_analytics):
         ),
     )
     @with_analytics(get_analytics(), "Notification-Tool")
-    def notification_tool(title: str, message: str, ctx: Context = None) -> str:
+    def notification_tool(
+        title: Annotated[
+            str,
+            Field(description="The title/heading of the toast notification."),
+        ],
+        message: Annotated[
+            str,
+            Field(description="The body text of the toast notification displayed below the title."),
+        ],
+        app_id: Annotated[
+            str,
+            Field(
+                description="The valid Application User Model ID of the toast notification. Required to display the notification in a specific app.",
+            ),
+        ],
+        ctx: Context = None,
+    ) -> str:
         try:
-            return get_desktop().send_notification(title, message)
+            return get_desktop().send_notification(title, message, app_id)
         except Exception as e:
             return f"Error sending notification: {str(e)}"
