@@ -341,6 +341,8 @@ No additional environment variables are needed. The MCP client connects directly
 
 In remote mode, Windows-MCP acts as a **proxy** that connects to the [windowsmcp.io](https://windowsmcp.io) enabling cloud-hosted Windows automation. This is designed for scenarios where the MCP client is remote and connects through the dashboard, which routes requests to a Windows VM running Windows-MCP.
 
+When installed as a desktop extension, remote mode should stay on that lightweight proxy path and must not require local Windows automation dependencies to build before startup.
+
 **Required environment variables:**
 
 | Variable | Description |

@@ -1,15 +1,10 @@
-from windows_mcp.analytics import PostHogAnalytics
-from fastmcp.client.transports import StreamableHttpTransport
-from fastmcp.server.providers.proxy import ProxyClient
-from windows_mcp.desktop.service import Desktop, Size
-from windows_mcp.watchdog.service import WatchDog
 from contextlib import asynccontextmanager
 from windows_mcp.auth import AuthClient
 from fastmcp import FastMCP
-from windows_mcp.tools import register_all
 from dataclasses import dataclass, field
 from textwrap import dedent
 from enum import Enum
+from typing import Any
 import logging
 import asyncio
 import click
@@ -17,42 +12,16 @@ import os
 
 logger = logging.getLogger(__name__)
 
-desktop: Desktop | None = None
-watchdog: WatchDog | None = None
-analytics: PostHogAnalytics | None = None
-screen_size: Size | None = None
+desktop: Any | None = None
+watchdog: Any | None = None
+analytics: Any | None = None
+screen_size: Any | None = None
+_local_mcp: FastMCP | None = None
 
 instructions = dedent("""
 Windows MCP server provides tools to interact directly with the Windows desktop,
 thus enabling to operate the desktop on the user's behalf.
 """)
-
-
-@asynccontextmanager
-async def lifespan(app: FastMCP):
-    """Runs initialization code before the server starts and cleanup code after it shuts down."""
-    global desktop, watchdog, analytics, screen_size
-
-    # Initialize components here instead of at module level
-    if os.getenv("ANONYMIZED_TELEMETRY", "true").lower() != "false":
-        analytics = PostHogAnalytics()
-    desktop = Desktop()
-    watchdog = WatchDog()
-    screen_size = desktop.get_screen_size()
-    watchdog.set_focus_callback(desktop.tree.on_focus_change)
-
-    try:
-        watchdog.start()
-        await asyncio.sleep(1)  # Simulate startup latency
-        yield
-    finally:
-        if watchdog:
-            watchdog.stop()
-        if analytics:
-            await analytics.close()
-
-
-mcp = FastMCP(name="windows-mcp", instructions=instructions, lifespan=lifespan)
 
 
 def _get_desktop():
@@ -63,11 +32,62 @@ def _get_analytics():
     return analytics
 
 
-# Register all tool definitions from the tools subpackage
-register_all(mcp, get_desktop=_get_desktop, get_analytics=_get_analytics)
+def _build_local_mcp() -> FastMCP:
+    """Create the local desktop-control server only when local mode is used."""
+    global _local_mcp
 
-# Backward-compatible re-exports for existing tests
-from windows_mcp.tools.snapshot import state_tool, screenshot_tool  # noqa: E402, F401
+    if _local_mcp is not None:
+        return _local_mcp
+
+    from windows_mcp.analytics import PostHogAnalytics
+    from windows_mcp.desktop.service import Desktop
+    from windows_mcp.tools import register_all
+    from windows_mcp.watchdog.service import WatchDog
+
+    @asynccontextmanager
+    async def lifespan(app: FastMCP):
+        """Runs initialization code before the server starts and cleanup code after it shuts down."""
+        global desktop, watchdog, analytics, screen_size
+
+        if os.getenv("ANONYMIZED_TELEMETRY", "true").lower() != "false":
+            analytics = PostHogAnalytics()
+        desktop = Desktop()
+        watchdog = WatchDog()
+        screen_size = desktop.get_screen_size()
+        watchdog.set_focus_callback(desktop.tree.on_focus_change)
+
+        try:
+            watchdog.start()
+            await asyncio.sleep(1)  # Simulate startup latency
+            yield
+        finally:
+            if watchdog:
+                watchdog.stop()
+            if analytics:
+                await analytics.close()
+
+    _local_mcp = FastMCP(name="windows-mcp", instructions=instructions, lifespan=lifespan)
+    register_all(_local_mcp, get_desktop=_get_desktop, get_analytics=_get_analytics)
+    return _local_mcp
+
+
+def __getattr__(name: str):
+    if name in {"state_tool", "screenshot_tool"}:
+        _build_local_mcp()
+        from windows_mcp.tools import snapshot
+
+        tool = getattr(snapshot, name)
+        if tool is None:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        return getattr(tool, "fn", tool)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _get_remote_proxy_types():
+    from fastmcp.client.transports import StreamableHttpTransport
+    from fastmcp.server.providers.proxy import ProxyClient
+
+    return StreamableHttpTransport, ProxyClient
 
 
 @dataclass
@@ -89,6 +109,38 @@ class Mode(Enum):
     REMOTE = "remote"
     def __str__(self):
         return self.value
+
+
+def _run_local_mode(transport: str, host: str, port: int) -> None:
+    local_mcp = _build_local_mcp()
+    match transport:
+        case Transport.STDIO.value:
+            local_mcp.run(transport=Transport.STDIO.value, show_banner=False)
+        case Transport.SSE.value | Transport.STREAMABLE_HTTP.value:
+            local_mcp.run(transport=transport, host=host, port=port, show_banner=False)
+        case _:
+            raise ValueError(f"Invalid transport: {transport}")
+
+
+def _run_remote_mode(config: Config, transport: str, host: str, port: int) -> None:
+    if not config.sandbox_id:
+        raise ValueError("SANDBOX_ID is required for MODE: remote")
+    if not config.api_key:
+        raise ValueError("API_KEY is required for MODE: remote")
+
+    client = AuthClient(api_key=config.api_key, sandbox_id=config.sandbox_id)
+    client.authenticate()
+    streamable_http_transport, proxy_client = _get_remote_proxy_types()
+    backend = streamable_http_transport(url=client.proxy_url, headers=client.proxy_headers)
+    proxy_mcp = FastMCP.as_proxy(proxy_client(backend), name="windows-mcp")
+
+    match transport:
+        case Transport.STDIO.value:
+            proxy_mcp.run(transport=Transport.STDIO.value, show_banner=False)
+        case Transport.SSE.value | Transport.STREAMABLE_HTTP.value:
+            proxy_mcp.run(transport=transport, host=host, port=port, show_banner=False)
+        case _:
+            raise ValueError(f"Invalid transport: {transport}")
 
 @click.command()
 @click.option(
@@ -113,36 +165,16 @@ class Mode(Enum):
 )
 
 def main(transport, host, port):
-    config=Config(
-        mode=os.getenv("MODE",Mode.LOCAL.value).lower(),
-        sandbox_id=os.getenv("SANDBOX_ID",''),
-        api_key=os.getenv("API_KEY",'')
+    config = Config(
+        mode=os.getenv("MODE", Mode.LOCAL.value).lower(),
+        sandbox_id=os.getenv("SANDBOX_ID", ''),
+        api_key=os.getenv("API_KEY", '')
     )
     match config.mode:
         case Mode.LOCAL.value:
-            match transport:
-                case Transport.STDIO.value:
-                    mcp.run(transport=Transport.STDIO.value,show_banner=False)
-                case Transport.SSE.value|Transport.STREAMABLE_HTTP.value:
-                    mcp.run(transport=transport,host=host,port=port,show_banner=False)
-                case _:
-                    raise ValueError(f"Invalid transport: {transport}")
+            _run_local_mode(transport=transport, host=host, port=port)
         case Mode.REMOTE.value:
-            if not config.sandbox_id:
-                raise ValueError("SANDBOX_ID is required for MODE: remote")
-            if not config.api_key:
-                raise ValueError("API_KEY is required for MODE: remote")
-            client=AuthClient(api_key=config.api_key,sandbox_id=config.sandbox_id)
-            client.authenticate()
-            backend=StreamableHttpTransport(url=client.proxy_url,headers=client.proxy_headers)
-            proxy_mcp=FastMCP.as_proxy(ProxyClient(backend),name="windows-mcp")
-            match transport:
-                case Transport.STDIO.value:
-                    proxy_mcp.run(transport=Transport.STDIO.value,show_banner=False)
-                case Transport.SSE.value|Transport.STREAMABLE_HTTP.value:
-                    proxy_mcp.run(transport=transport,host=host,port=port,show_banner=False)
-                case _:
-                    raise ValueError(f"Invalid transport: {transport}")
+            _run_remote_mode(config=config, transport=transport, host=host, port=port)
         case _:
             raise ValueError(f"Invalid mode: {config.mode}")
 
