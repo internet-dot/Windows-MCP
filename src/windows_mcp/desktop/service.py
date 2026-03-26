@@ -1,4 +1,9 @@
-from windows_mcp.desktop.utils import ps_quote, ps_quote_for_xml, resolve_known_folder_guid_path
+from windows_mcp.desktop.utils import (
+    ps_quote,
+    ps_quote_for_xml,
+    resolve_known_folder_guid_path,
+    run_with_graceful_timeout
+)
 from windows_mcp.vdm.core import (
     get_all_desktops,
     get_current_desktop,
@@ -420,7 +425,7 @@ class Desktop:
                 args.extend(["-OutputFormat", "Text"])
             args.extend(["-EncodedCommand", encoded])
 
-            result = subprocess.run(
+            result = run_with_graceful_timeout(
                 args,
                 stdin=subprocess.DEVNULL,  # Prevent child processes from inheriting the MCP pipe stdin
                 capture_output=True,  # No errors='ignore' - let subprocess return bytes
