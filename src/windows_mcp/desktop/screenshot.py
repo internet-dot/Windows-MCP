@@ -6,7 +6,7 @@ from PIL import Image, ImageGrab
 
 try:
     import dxcam
-except ImportError:
+except Exception:
     dxcam = None
 
 try:
