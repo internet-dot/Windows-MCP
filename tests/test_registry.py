@@ -3,6 +3,8 @@ from unittest.mock import patch
 import pytest
 
 from windows_mcp.desktop.service import Desktop
+from windows_mcp.desktop.utils import ps_quote
+
 
 EXECUTE_COMMAND_PATH = "windows_mcp.desktop.powershell.PowerShellExecutor.execute_command"
 
@@ -16,22 +18,22 @@ def desktop():
 
 class TestPsQuote:
     def test_simple_string(self):
-        assert Desktop._ps_quote("hello") == "'hello'"
+        assert ps_quote("hello") == "'hello'"
 
     def test_single_quote_escaping(self):
-        assert Desktop._ps_quote("it's") == "'it''s'"
+        assert ps_quote("it's") == "'it''s'"
 
     def test_double_quotes_not_escaped(self):
-        assert Desktop._ps_quote('say "hi"') == """'say "hi"'"""
+        assert ps_quote('say "hi"') == """'say "hi"'"""
 
     def test_dollar_sign_not_expanded(self):
-        assert Desktop._ps_quote("$env:PATH") == "'$env:PATH'"
+        assert ps_quote("$env:PATH") == "'$env:PATH'"
 
     def test_empty_string(self):
-        assert Desktop._ps_quote("") == "''"
+        assert ps_quote("") == "''"
 
     def test_registry_path(self):
-        result = Desktop._ps_quote("HKCU:\\Software\\Test")
+        result = ps_quote("HKCU:\\Software\\Test")
         assert result == "'HKCU:\\Software\\Test'"
 
 
