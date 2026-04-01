@@ -77,13 +77,7 @@
       "title": "Screenshot Backend",
       "description": "The engine used to capture screenshots. 'auto' automatically selects the fastest available backend (DXGI -> MSS -> Pillow). Use 'pillow' if you encounter capture issues.",
       "required": false,
-      "default": "auto",
-      "enum": [
-        "auto",
-        "dxcam",
-        "mss",
-        "pillow"
-      ]
+      "default": "auto"
     },
     "debug": {
       "type": "boolean",
