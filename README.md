@@ -316,6 +316,51 @@ args=[
   5. Rerun Codex CLI in terminal. Enjoy 🥳
 </details>
 
+<details>
+  <summary>Install in Claude Code</summary>
+
+  1. Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview):
+
+```shell
+npm install -g @anthropic-ai/claude-code
+```
+
+  2. Configure the server:
+
+  **Option A: Install from PyPI (Recommended)**
+
+  Use `uvx` to run the latest version directly from PyPI.
+
+  ```shell
+  claude mcp add --transport stdio windows-mcp -- uvx windows-mcp
+  ```
+
+  **Option B: Install from Source**
+
+  1. Clone the repository:
+  ```shell
+  git clone https://github.com/CursorTouch/Windows-MCP.git
+  cd Windows-MCP
+  ```
+
+  2. Run the following command in your terminal:
+  ```shell
+  claude mcp add --transport stdio windows-mcp -- uv --directory "<path>" run windows-mcp
+  ```
+
+  *Note: To make the server available across all projects, add `--scope user` to the command.*
+
+  3. Rerun Claude Code in terminal. Enjoy 🥳
+
+  **Note:** On Windows, if you encounter "Connection closed" errors, use the full path to `uvx.exe`:
+
+  ```shell
+  claude mcp add --transport stdio windows-mcp -- C:\Users\<user>\.local\bin\uvx.exe windows-mcp
+  ```
+
+  To verify the server is registered, run `claude mcp list`. Inside Claude Code, use `/mcp` to check server status.
+</details>
+
 ---
 
 ## 🖥️ Modes
