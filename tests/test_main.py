@@ -1,8 +1,25 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import tomllib
 
 import windows_mcp.__main__ as main_module
+
+
+class TestCryptographyPin:
+    """Ensure the cryptography upper-bound stays within the win_arm64 wheel range."""
+
+    def test_cryptography_upper_bound_has_arm64_wheels(self):
+        pyproject = Path(__file__).parent.parent / "pyproject.toml"
+        data = tomllib.loads(pyproject.read_text())
+        deps = data["project"]["dependencies"]
+        crypto_spec = next(d for d in deps if d.startswith("cryptography"))
+        # Only 46.0.0–46.0.3 ship pre-built win_arm64 wheels; versions above
+        # 46.0.3 force a source build that fails on ARM64.
+        assert "<=46.0.3" in crypto_spec, (
+            f"cryptography upper bound must be <=46.0.3 for win_arm64 support, got: {crypto_spec!r}"
+        )
 
 
 class TestModeDispatch:
