@@ -345,7 +345,7 @@ npm install -g @anthropic-ai/claude-code
 
   2. Run the following command in your terminal:
   ```shell
-  claude mcp add --transport stdio windows-mcp -- uv --directory <path to the windows-mcp directory> run windows-mcp
+  claude mcp add --transport stdio windows-mcp -- uv --directory "<path>" run windows-mcp
   ```
 
   *Note: To make the server available across all projects, add `--scope user` to the command.*
