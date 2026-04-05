@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 from windows_mcp.auth import AuthClient
 from windows_mcp.config import is_debug, enable_debug
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from dataclasses import dataclass, field
 from textwrap import dedent
 from enum import Enum
@@ -31,6 +33,57 @@ def _get_desktop():
 
 def _get_analytics():
     return analytics
+
+
+def _http_middleware() -> list:
+    """Return ASGI middleware for HTTP transports including CORS and OPTIONS handling."""
+    return [
+        Middleware(OptionsMiddleware),
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        ),
+    ]
+
+
+class OptionsMiddleware:
+    """ASGI middleware that intercepts OPTIONS requests and returns 200 OK."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope["method"] == "OPTIONS":
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [
+                        [b"content-length", b"0"],
+                        [b"access-control-allow-origin", b"*"],
+                        [b"access-control-allow-methods", b"*"],
+                        [b"access-control-allow-headers", b"*"],
+                    ],
+                }
+            )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"",
+                }
+            )
+        else:
+            await self.app(scope, receive, send)
+
+
+def _add_cors_options_handlers(mcp: FastMCP) -> None:
+    """Register custom route handlers for CORS OPTIONS requests."""
+    # Note: Custom routes are registered via the http_app() method when
+    # the app is created, so we don't need to do anything here with the new
+    # OptionsMiddleware approach. The middleware is passed via run().
+    pass
 
 
 def _build_local_mcp() -> FastMCP:
@@ -71,6 +124,7 @@ def _build_local_mcp() -> FastMCP:
 
     _local_mcp = FastMCP(name="windows-mcp", instructions=instructions, lifespan=lifespan)
     register_all(_local_mcp, get_desktop=_get_desktop, get_analytics=_get_analytics)
+    _add_cors_options_handlers(_local_mcp)
     return _local_mcp
 
 
@@ -120,7 +174,13 @@ def _run_local_mode(transport: str, host: str, port: int) -> None:
         case Transport.STDIO.value:
             local_mcp.run(transport=Transport.STDIO.value, show_banner=False)
         case Transport.SSE.value | Transport.STREAMABLE_HTTP.value:
-            local_mcp.run(transport=transport, host=host, port=port, show_banner=False)
+            local_mcp.run(
+                transport=transport,
+                host=host,
+                port=port,
+                show_banner=False,
+                middleware=_http_middleware(),
+            )
         case _:
             raise ValueError(f"Invalid transport: {transport}")
 
@@ -136,12 +196,19 @@ def _run_remote_mode(config: Config, transport: str, host: str, port: int) -> No
     streamable_http_transport, proxy_client = _get_remote_proxy_types()
     backend = streamable_http_transport(url=client.proxy_url, headers=client.proxy_headers)
     proxy_mcp = FastMCP.as_proxy(proxy_client(backend), name="windows-mcp")
+    _add_cors_options_handlers(proxy_mcp)
 
     match transport:
         case Transport.STDIO.value:
             proxy_mcp.run(transport=Transport.STDIO.value, show_banner=False)
         case Transport.SSE.value | Transport.STREAMABLE_HTTP.value:
-            proxy_mcp.run(transport=transport, host=host, port=port, show_banner=False)
+            proxy_mcp.run(
+                transport=transport,
+                host=host,
+                port=port,
+                show_banner=False,
+                middleware=_http_middleware(),
+            )
         case _:
             raise ValueError(f"Invalid transport: {transport}")
 
