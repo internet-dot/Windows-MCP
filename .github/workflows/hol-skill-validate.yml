@@ -1,18 +1,19 @@
-name: HOL Skill Validate
+name: Codex Plugin Scanner CI
 on:
   push:
     branches: [main, master]
   pull_request:
 
 jobs:
-  validate-skill:
+  scan-plugin:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Validate skill package
-        uses: hashgraph-online/skill-publish@4119400f6195122738899822e128c3c515b45301 # v1
+      - name: Scan Codex plugin
+        uses: hashgraph-online/hol-codex-plugin-scanner-action@40d95e49abdd8aeb34b534461a9fa4f96cdd4d7c
         with:
-          skill-dir: .
-          mode: validate
+          plugin_dir: .
+          fail_on_severity: none
